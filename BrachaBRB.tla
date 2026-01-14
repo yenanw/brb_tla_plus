@@ -21,11 +21,14 @@ Range(s) == { s[i] : i \in 1..Len(s) }
 CorrectProc == Proc \ Byzantine
 Correct(p) == p \notin Byzantine
 
+\* Symmetry set for TLC performance
+Symmetry == Permutations(Proc)
+
 (*--algorithm BrachaBRB
 
 variables
-  msgs      = {},                     \* messages in transit
-  msgBuffer = {},                     \* temporary buffer for messages
+  msgs      = {},                     \* all messages ever sent 
+  processed = [p \in Proc |-> {}],    \* messages processed by each process
   sentREADY = [p \in Proc |-> {}],    \* READY broadcast
   recvINIT  = [p \in Proc |-> {}],    \* first INIT seen
   recvECHO  = [p \in Proc |-> {}],
@@ -34,25 +37,13 @@ variables
 
 define
   (*====Utility functions====*)
-  INIT(orig, val) ==
-    [ type |-> "INIT",
-      orig |-> orig,
-      val  |-> val ]
+  INIT(orig, val)  == [ type |-> "INIT",  orig |-> orig, val  |-> val ]
+  ECHO(orig, val)  == [ type |-> "ECHO",  orig |-> orig, val  |-> val ]
+  READY(orig, val) == [ type |-> "READY", orig |-> orig, val  |-> val ]
 
-  ECHO(orig, val) ==
-    [ type |-> "ECHO",
-      orig |-> orig,
-      val  |-> val ]
-
-  READY(orig, val) ==
-    [ type |-> "READY",
-      orig |-> orig,
-      val  |-> val ]
-    
-  RecvEnough(msgSet, msg, proc, count) ==
-    LET RelevantMsgs == { m \in msgSet[proc] : 
-                          m.orig = msg.orig /\ m.val = msg.val }
-        Senders == { m.from : m \in RelevantMsgs }
+  RecvEnough(msgSet, mOrig, mVal, proc, count) ==
+    LET Senders == { m.from : m \in msgSet[proc]
+                     \cap [type: {"ECHO", "READY"}, orig: {mOrig}, val: {mVal}] }
     IN 
       Cardinality(Senders) > count
 
@@ -83,8 +74,10 @@ define
      from the same sender (even if that sender is Byzantine). *)
   BRB_NoDuplicity ==
     \A p1, p2 \in CorrectProc :
-      \A d1 \in Range(delivered[p1]), d2 \in Range(delivered[p2]) :
-        (d1.orig = d2.orig) => (d1.val = d2.val) 
+      \A d1 \in {delivered[p1][i] : i \in 1..Len(delivered[p1])}, 
+         d2 \in {delivered[p2][i] : i \in 1..Len(delivered[p2])} :
+         (d1.orig = d2.orig) => (d1.val = d2.val)
+
   (* BRB-termination-1: If the sender is non-faulty, all non-faulty 
      processes eventually deliver its message. *)
   BRB_Termination1 ==
@@ -103,135 +96,92 @@ define
   (* Contraints *)
   StateConstraint == 
     /\ Cardinality(msgs) < 10
-    /\ \A p \in Proc : Len(delivered[p]) < 2
+    /\ \A proc \in Proc : Len(delivered[proc]) < 2
 end define;
 
 (* simple broadcast macro *)
-macro SendAll(msg, proc) begin
-  msgBuffer := { [type |-> msg.type, from |-> proc, to |-> q,
-                   orig |-> msg.orig, val |-> msg.val] : q \in Proc };
+macro SendAll(mType, mOrig, mVal, proc) begin
+  msgs := msgs \cup { [type |-> mType, from |-> proc, to |-> q,
+                       orig |-> mOrig, val |-> mVal] : q \in Proc};
 end macro;
 
-macro Deliver(msg, proc) begin
-    \* delivered[p] := delivered[p] \union [orig |-> msg.orig, val |-> msg.val];
-    delivered[proc] := Append(delivered[proc], [orig |-> msg.orig, val |-> msg.val]);
-end macro;
-
-macro HandleInit(proc, msg) begin
-  (* only INIT messages are checked for first reception *)
-  if msg \notin recvINIT[proc] then
-    recvINIT[proc] := recvINIT[proc] \union {msg};
-    SendAll(ECHO(msg.orig, msg.val), proc);
+macro HandleMsg(msg, proc) begin
+  processed[proc] := processed[proc] \union {m};
+  if m.type = "INIT" /\ m \notin recvINIT[proc] then
+      (* only INIT messages are checked for first reception *)
+      recvINIT[proc] := recvINIT[proc] \union {m};
+      SendAll("ECHO", m.orig, m.val, proc);
+  elsif m.type = "ECHO" then
+      recvECHO[proc] := recvECHO[proc] \union {m};
+      if RecvEnough(recvECHO, m.orig, m.val, proc, (n + t) \div 2) 
+         /\ READY(m.orig, m.val) \notin sentREADY[proc] then
+          SendAll("READY", m.orig, m.val, proc);
+          sentREADY[proc] := sentREADY[proc] \cup {READY(m.orig, m.val)};
+      end if;
+  elsif m.type = "READY" then
+      recvREADY[proc] := recvREADY[proc] \union {m};
+      \* Condition for amplification (t + 1)
+      if RecvEnough(recvREADY, m.orig, m.val, proc, t) 
+         /\ READY(m.orig, m.val) \notin sentREADY[proc] then
+          SendAll("READY", m.orig, m.val, proc);
+          sentREADY[proc] := sentREADY[proc] \union {READY(m.orig, m.val)};
+      end if;
+      \* Condition for delivery (2t + 1)
+      if RecvEnough(recvREADY, m.orig, m.val, proc, 2 * t) 
+         /\ ~IsDelivered(m.orig, m.val, proc) then
+          delivered[proc] := Append(delivered[proc], [orig |-> m.orig, val |-> m.val]);
+      end if;
   end if;
-end macro;
-
-macro HandleEcho(proc, msg) begin
-  recvECHO[proc] := recvECHO[proc] \union {msg};
-  with recvEnoughEcho = RecvEnough(recvECHO, msg, proc, (n + t) \div 2),
-       readyMsg = READY(msg.orig, msg.val),
-       notYetBroadcast = readyMsg \notin sentREADY[proc] do
-    if recvEnoughEcho /\ notYetBroadcast then
-        SendAll(readyMsg, proc);
-        sentREADY[proc] := sentREADY[proc] \union {readyMsg};
-    end if;
-  end with;
-end macro;
-
-macro HandleReady(proc, msg) begin
-  recvREADY[proc] := recvREADY[proc] \union {msg};
-  (* algorithm specifies "received from (t + 1) different processors", *)
-  (* which translates to more than t different processors *)
-  with recvEnoughForBroadcast = RecvEnough(recvREADY, msg, proc, t),
-       readyMsg = READY(msg.orig, msg.val),
-       notYetBroadcast = readyMsg \notin sentREADY[proc] do
-    if recvEnoughForBroadcast /\ notYetBroadcast then
-        SendAll(readyMsg, proc);
-        sentREADY[proc] := sentREADY[proc] \union {readyMsg};
-    end if;
-  end with;
-
-  (* algorithm specifies "received from (2t + 1) different processors" *)
-  with recvEnoughForDeliver = RecvEnough(recvREADY, msg, proc, 2 * t),
-       notYetDelivered = ~IsDelivered(msg.orig, msg.val, proc) do
-    if recvEnoughForDeliver /\ notYetDelivered then
-        Deliver(msg, proc);
-    end if;
-  end with;
 end macro;
 
 fair process p \in (Proc \ Byzantine)
 begin
-  InitStep:
-    if self = Initiator /\ Correct(self) then
-      with m \in Values do
-        SendAll(INIT(self, m), self);
-        msgs := msgs \union msgBuffer;
-      end with;
-    end if;
-
-  ClearBuffer:
-    msgBuffer := {};
-  HandleMsg:
-    either
-      \* deliver any pending message that is sent to p
-      with msg \in {m \in msgs : m.to = self} do
-        if msg.type = "INIT" then
-          HandleInit(self, msg);
-        elsif msg.type = "ECHO" then
-          HandleEcho(self, msg);
-        else
-          HandleReady(self, msg);
+  P_Loop:
+    while TRUE do
+      either
+        \* initial step for the designated Initiator
+        if self = Initiator /\ recvINIT[self] = {} then
+          with v \in Values do
+            SendAll("INIT", self, v, self);
+            recvINIT[self] := {INIT(self, v)};
+          end with;
         end if;
-        msgs := (msgs \ {msg}) \union msgBuffer;
-      end with;
-    or
-      skip;
-    end either;
-    goto ClearBuffer;
+      or
+        \* process any message to p that hasn't been processed yet
+        with m \in {msg \in msgs : msg.to = self /\ msg \notin processed[self]} do
+          HandleMsg(self, m);
+        end with;
+      end either;
+    end while;
 end process;
 
-fair process b \in Byzantine
+process b \in Byzantine
 begin
-  ByzantineStep:
-    either
-      \* arbitrary Byzantine message send
-      with q \in Proc, j \in Proc, m \in Values,
-           ty \in {"INIT", "ECHO", "READY"} do
-        msgs := msgs \union
-          { [type |-> ty, from |-> self, to |-> q,
-             orig |-> j, val |-> m] };
-      end with;
-    or
-      skip;
-    end either;
-    goto ByzantineStep;
+  B_Step:
+    \* Byzantine processes can send any messages to any subset of processes all at once
+    with targetMsgs \in SUBSET ([type : {"ECHO", "READY"}, 
+                                from : {self}, to : Proc, 
+                                orig : Proc, val : Values]) do
+       msgs := msgs \cup targetMsgs;
+    end with;
+    \* Byzantine process finishes to keep state space finite,
+    \* this is to prevent unbounded execution while still modelling
+    \* Byzantine behaviors
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "b4f17311" /\ chksum(tla) = "1a8069c4")
-VARIABLES pc, msgs, msgBuffer, sentREADY, recvINIT, recvECHO, recvREADY, 
+\* BEGIN TRANSLATION (chksum(pcal) = "accfad45" /\ chksum(tla) = "d0da2b38")
+VARIABLES pc, msgs, processed, sentREADY, recvINIT, recvECHO, recvREADY, 
           delivered
 
 (* define statement *)
-INIT(orig, val) ==
-  [ type |-> "INIT",
-    orig |-> orig,
-    val  |-> val ]
+INIT(orig, val)  == [ type |-> "INIT",  orig |-> orig, val  |-> val ]
+ECHO(orig, val)  == [ type |-> "ECHO",  orig |-> orig, val  |-> val ]
+READY(orig, val) == [ type |-> "READY", orig |-> orig, val  |-> val ]
 
-ECHO(orig, val) ==
-  [ type |-> "ECHO",
-    orig |-> orig,
-    val  |-> val ]
-
-READY(orig, val) ==
-  [ type |-> "READY",
-    orig |-> orig,
-    val  |-> val ]
-
-RecvEnough(msgSet, msg, proc, count) ==
-  LET RelevantMsgs == { m \in msgSet[proc] :
-                        m.orig = msg.orig /\ m.val = msg.val }
-      Senders == { m.from : m \in RelevantMsgs }
+RecvEnough(msgSet, mOrig, mVal, proc, count) ==
+  LET Senders == { m.from : m \in msgSet[proc]
+                   \cap [type: {"ECHO", "READY"}, orig: {mOrig}, val: {mVal}] }
   IN
     Cardinality(Senders) > count
 
@@ -262,8 +212,10 @@ BRB_Validity ==
 
 BRB_NoDuplicity ==
   \A p1, p2 \in CorrectProc :
-    \A d1 \in Range(delivered[p1]), d2 \in Range(delivered[p2]) :
-      (d1.orig = d2.orig) => (d1.val = d2.val)
+    \A d1 \in {delivered[p1][i] : i \in 1..Len(delivered[p1])},
+       d2 \in {delivered[p2][i] : i \in 1..Len(delivered[p2])} :
+       (d1.orig = d2.orig) => (d1.val = d2.val)
+
 
 
 BRB_Termination1 ==
@@ -282,125 +234,96 @@ BRB_Termination2 ==
 
 StateConstraint ==
   /\ Cardinality(msgs) < 10
-  /\ \A p \in Proc : Len(delivered[p]) < 2
+  /\ \A proc \in Proc : Len(delivered[proc]) < 2
 
 
-vars == << pc, msgs, msgBuffer, sentREADY, recvINIT, recvECHO, recvREADY, 
+vars == << pc, msgs, processed, sentREADY, recvINIT, recvECHO, recvREADY, 
            delivered >>
 
 ProcSet == ((Proc \ Byzantine)) \cup (Byzantine)
 
 Init == (* Global variables *)
         /\ msgs = {}
-        /\ msgBuffer = {}
+        /\ processed = [p \in Proc |-> {}]
         /\ sentREADY = [p \in Proc |-> {}]
         /\ recvINIT = [p \in Proc |-> {}]
         /\ recvECHO = [p \in Proc |-> {}]
         /\ recvREADY = [p \in Proc |-> {}]
         /\ delivered = [p \in Proc |-> << >>]
-        /\ pc = [self \in ProcSet |-> CASE self \in (Proc \ Byzantine) -> "InitStep"
-                                        [] self \in Byzantine -> "ByzantineStep"]
+        /\ pc = [self \in ProcSet |-> CASE self \in (Proc \ Byzantine) -> "P_Loop"
+                                        [] self \in Byzantine -> "B_Step"]
 
-InitStep(self) == /\ pc[self] = "InitStep"
-                  /\ IF self = Initiator /\ Correct(self)
-                        THEN /\ \E m \in Values:
-                                  /\ msgBuffer' = { [type |-> (INIT(self, m)).type, from |-> self, to |-> q,
-                                                      orig |-> (INIT(self, m)).orig, val |-> (INIT(self, m)).val] : q \in Proc }
-                                  /\ msgs' = (msgs \union msgBuffer')
-                        ELSE /\ TRUE
-                             /\ UNCHANGED << msgs, msgBuffer >>
-                  /\ pc' = [pc EXCEPT ![self] = "ClearBuffer"]
-                  /\ UNCHANGED << sentREADY, recvINIT, recvECHO, recvREADY, 
-                                  delivered >>
+P_Loop(self) == /\ pc[self] = "P_Loop"
+                /\ \/ /\ IF self = Initiator /\ recvINIT[self] = {}
+                            THEN /\ \E v \in Values:
+                                      /\ msgs' = (msgs \cup { [type |-> "INIT", from |-> self, to |-> q,
+                                                               orig |-> self, val |-> v] : q \in Proc})
+                                      /\ recvINIT' = [recvINIT EXCEPT ![self] = {INIT(self, v)}]
+                            ELSE /\ TRUE
+                                 /\ UNCHANGED << msgs, recvINIT >>
+                      /\ UNCHANGED <<processed, sentREADY, recvECHO, recvREADY, delivered>>
+                   \/ /\ \E m \in {msg \in msgs : msg.to = self /\ msg \notin processed[self]}:
+                           /\ processed' = [processed EXCEPT ![m] = processed[m] \union {m}]
+                           /\ IF m.type = "INIT" /\ m \notin recvINIT[m]
+                                 THEN /\ recvINIT' = [recvINIT EXCEPT ![m] = recvINIT[m] \union {m}]
+                                      /\ msgs' = (msgs \cup { [type |-> "ECHO", from |-> m, to |-> q,
+                                                               orig |-> (m.orig), val |-> (m.val)] : q \in Proc})
+                                      /\ UNCHANGED << sentREADY, recvECHO, 
+                                                      recvREADY, delivered >>
+                                 ELSE /\ IF m.type = "ECHO"
+                                            THEN /\ recvECHO' = [recvECHO EXCEPT ![m] = recvECHO[m] \union {m}]
+                                                 /\ IF RecvEnough(recvECHO', m.orig, m.val, m, (n + t) \div 2)
+                                                       /\ READY(m.orig, m.val) \notin sentREADY[m]
+                                                       THEN /\ msgs' = (msgs \cup { [type |-> "READY", from |-> m, to |-> q,
+                                                                                     orig |-> (m.orig), val |-> (m.val)] : q \in Proc})
+                                                            /\ sentREADY' = [sentREADY EXCEPT ![m] = sentREADY[m] \cup {READY(m.orig, m.val)}]
+                                                       ELSE /\ TRUE
+                                                            /\ UNCHANGED << msgs, 
+                                                                            sentREADY >>
+                                                 /\ UNCHANGED << recvREADY, 
+                                                                 delivered >>
+                                            ELSE /\ IF m.type = "READY"
+                                                       THEN /\ recvREADY' = [recvREADY EXCEPT ![m] = recvREADY[m] \union {m}]
+                                                            /\ IF RecvEnough(recvREADY', m.orig, m.val, m, t)
+                                                                  /\ READY(m.orig, m.val) \notin sentREADY[m]
+                                                                  THEN /\ msgs' = (msgs \cup { [type |-> "READY", from |-> m, to |-> q,
+                                                                                                orig |-> (m.orig), val |-> (m.val)] : q \in Proc})
+                                                                       /\ sentREADY' = [sentREADY EXCEPT ![m] = sentREADY[m] \union {READY(m.orig, m.val)}]
+                                                                  ELSE /\ TRUE
+                                                                       /\ UNCHANGED << msgs, 
+                                                                                       sentREADY >>
+                                                            /\ IF RecvEnough(recvREADY', m.orig, m.val, m, 2 * t)
+                                                                  /\ ~IsDelivered(m.orig, m.val, m)
+                                                                  THEN /\ delivered' = [delivered EXCEPT ![m] = Append(delivered[m], [orig |-> m.orig, val |-> m.val])]
+                                                                  ELSE /\ TRUE
+                                                                       /\ UNCHANGED delivered
+                                                       ELSE /\ TRUE
+                                                            /\ UNCHANGED << msgs, 
+                                                                            sentREADY, 
+                                                                            recvREADY, 
+                                                                            delivered >>
+                                                 /\ UNCHANGED recvECHO
+                                      /\ UNCHANGED recvINIT
+                /\ pc' = [pc EXCEPT ![self] = "P_Loop"]
 
-ClearBuffer(self) == /\ pc[self] = "ClearBuffer"
-                     /\ msgBuffer' = {}
-                     /\ pc' = [pc EXCEPT ![self] = "HandleMsg"]
-                     /\ UNCHANGED << msgs, sentREADY, recvINIT, recvECHO, 
-                                     recvREADY, delivered >>
+p(self) == P_Loop(self)
 
-HandleMsg(self) == /\ pc[self] = "HandleMsg"
-                   /\ \/ /\ \E msg \in {m \in msgs : m.to = self}:
-                              /\ IF msg.type = "INIT"
-                                    THEN /\ IF msg \notin recvINIT[self]
-                                               THEN /\ recvINIT' = [recvINIT EXCEPT ![self] = recvINIT[self] \union {msg}]
-                                                    /\ msgBuffer' = { [type |-> (ECHO(msg.orig, msg.val)).type, from |-> self, to |-> q,
-                                                                        orig |-> (ECHO(msg.orig, msg.val)).orig, val |-> (ECHO(msg.orig, msg.val)).val] : q \in Proc }
-                                               ELSE /\ TRUE
-                                                    /\ UNCHANGED << msgBuffer, 
-                                                                    recvINIT >>
-                                         /\ UNCHANGED << sentREADY, recvECHO, 
-                                                         recvREADY, delivered >>
-                                    ELSE /\ IF msg.type = "ECHO"
-                                               THEN /\ recvECHO' = [recvECHO EXCEPT ![self] = recvECHO[self] \union {msg}]
-                                                    /\ LET recvEnoughEcho == RecvEnough(recvECHO', msg, self, (n + t) \div 2) IN
-                                                         LET readyMsg == READY(msg.orig, msg.val) IN
-                                                           LET notYetBroadcast == readyMsg \notin sentREADY[self] IN
-                                                             IF recvEnoughEcho /\ notYetBroadcast
-                                                                THEN /\ msgBuffer' = { [type |-> readyMsg.type, from |-> self, to |-> q,
-                                                                                         orig |-> readyMsg.orig, val |-> readyMsg.val] : q \in Proc }
-                                                                     /\ sentREADY' = [sentREADY EXCEPT ![self] = sentREADY[self] \union {readyMsg}]
-                                                                ELSE /\ TRUE
-                                                                     /\ UNCHANGED << msgBuffer, 
-                                                                                     sentREADY >>
-                                                    /\ UNCHANGED << recvREADY, 
-                                                                    delivered >>
-                                               ELSE /\ recvREADY' = [recvREADY EXCEPT ![self] = recvREADY[self] \union {msg}]
-                                                    /\ LET recvEnoughForBroadcast == RecvEnough(recvREADY', msg, self, t) IN
-                                                         LET readyMsg == READY(msg.orig, msg.val) IN
-                                                           LET notYetBroadcast == readyMsg \notin sentREADY[self] IN
-                                                             IF recvEnoughForBroadcast /\ notYetBroadcast
-                                                                THEN /\ msgBuffer' = { [type |-> readyMsg.type, from |-> self, to |-> q,
-                                                                                         orig |-> readyMsg.orig, val |-> readyMsg.val] : q \in Proc }
-                                                                     /\ sentREADY' = [sentREADY EXCEPT ![self] = sentREADY[self] \union {readyMsg}]
-                                                                ELSE /\ TRUE
-                                                                     /\ UNCHANGED << msgBuffer, 
-                                                                                     sentREADY >>
-                                                    /\ LET recvEnoughForDeliver == RecvEnough(recvREADY', msg, self, 2 * t) IN
-                                                         LET notYetDelivered == ~IsDelivered(msg.orig, msg.val, self) IN
-                                                           IF recvEnoughForDeliver /\ notYetDelivered
-                                                              THEN /\ delivered' = [delivered EXCEPT ![self] = Append(delivered[self], [orig |-> msg.orig, val |-> msg.val])]
-                                                              ELSE /\ TRUE
-                                                                   /\ UNCHANGED delivered
-                                                    /\ UNCHANGED recvECHO
-                                         /\ UNCHANGED recvINIT
-                              /\ msgs' = ((msgs \ {msg}) \union msgBuffer')
-                      \/ /\ TRUE
-                         /\ UNCHANGED <<msgs, msgBuffer, sentREADY, recvINIT, recvECHO, recvREADY, delivered>>
-                   /\ pc' = [pc EXCEPT ![self] = "ClearBuffer"]
+B_Step(self) == /\ pc[self] = "B_Step"
+                /\ \E targetMsgs \in SUBSET ([type : {"ECHO", "READY"},
+                                             from : {self}, to : Proc,
+                                             orig : Proc, val : Values]):
+                     msgs' = (msgs \cup targetMsgs)
+                /\ pc' = [pc EXCEPT ![self] = "Done"]
+                /\ UNCHANGED << processed, sentREADY, recvINIT, recvECHO, 
+                                recvREADY, delivered >>
 
-p(self) == InitStep(self) \/ ClearBuffer(self) \/ HandleMsg(self)
-
-ByzantineStep(self) == /\ pc[self] = "ByzantineStep"
-                       /\ \/ /\ \E q \in Proc:
-                                  \E j \in Proc:
-                                    \E m \in Values:
-                                      \E ty \in {"INIT", "ECHO", "READY"}:
-                                        msgs' = (      msgs \union
-                                                 { [type |-> ty, from |-> self, to |-> q,
-                                                    orig |-> j, val |-> m] })
-                          \/ /\ TRUE
-                             /\ msgs' = msgs
-                       /\ pc' = [pc EXCEPT ![self] = "ByzantineStep"]
-                       /\ UNCHANGED << msgBuffer, sentREADY, recvINIT, 
-                                       recvECHO, recvREADY, delivered >>
-
-b(self) == ByzantineStep(self)
-
-(* Allow infinite stuttering to prevent deadlock on termination. *)
-Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
-               /\ UNCHANGED vars
+b(self) == B_Step(self)
 
 Next == (\E self \in (Proc \ Byzantine): p(self))
            \/ (\E self \in Byzantine: b(self))
-           \/ Terminating
 
 Spec == /\ Init /\ [][Next]_vars
         /\ \A self \in (Proc \ Byzantine) : WF_vars(p(self))
-        /\ \A self \in Byzantine : WF_vars(b(self))
-
-Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
 \* END TRANSLATION 
-
 ====
