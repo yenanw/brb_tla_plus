@@ -5,8 +5,9 @@
 
 .vscode/
 
-# my setup autogenerates .out files for some reason  
+# auto-generated files when running TLC
 *.out
+states/
 
 ### TLA+ ###
 # Reference: https://github.com/jameshfisher/tlaplus/blob/master/.gitignore
