@@ -6,7 +6,7 @@ CONSTANTS
   Values,      \* broadcast values
   Byzantine,   \* subset of Proc
   Initiator,   \* designated broadcaster
-  MaxMsgCount  \* 
+  MaxMsgCount  \* constaint on the total messages sent to prevent unbounded states
 
 n == Cardinality(Proc)
 t == Cardinality(Byzantine)
@@ -45,7 +45,7 @@ define
   READY(orig, val) == [ type |-> "READY", orig |-> orig, val  |-> val ]
 
   RecvEnough(msgSet, mOrig, mVal, proc, count) ==
-    LET Senders == { m.from : m \in msgSet[proc]
+    LET Senders == { msg.from : msg \in msgSet[proc]
                      \cap [type: {"ECHO", "READY"}, orig: {mOrig}, val: {mVal}] }
     IN 
       Cardinality(Senders) > count
@@ -91,7 +91,7 @@ define
   BRB_Termination1 ==
     Correct(Initiator) => 
       \A proc \in CorrectProc :
-        <>(\E m \in Range(delivered[proc]) : m.orig = Initiator)
+        <>(\E msg \in Range(delivered[proc]) : msg.orig = Initiator)
   
   (* BRB-termination-2: If a non-faulty process delivers a message from
      any p_i (possibly faulty), then all non-faulty processes eventually deliver from p_i. *)
@@ -113,30 +113,30 @@ macro SendAll(mType, mOrig, mVal, proc) begin
 end macro;
 
 macro HandleMsg(msg, proc) begin
-  processed[proc] := processed[proc] \union {m};
-  if m.type = "INIT" /\ \neg \E prev \in recvINIT[proc] : prev.orig = m.orig then
+  processed[proc] := processed[proc] \union {msg};
+  if msg.type = "INIT" /\ \neg \E prev \in recvINIT[proc] : prev.orig = msg.orig then
     (* check that it's the FIRST time we received INIT from a process *)
-    recvINIT[proc] := recvINIT[proc] \union {m};
-    SendAll("ECHO", m.orig, m.val, proc);
-  elsif m.type = "ECHO" then
-    recvECHO[proc] := recvECHO[proc] \union {m};
-    if RecvEnough(recvECHO, m.orig, m.val, proc, (n + t) \div 2) 
-       /\ READY(m.orig, m.val) \notin sentREADY[proc] then
-      SendAll("READY", m.orig, m.val, proc);
-      sentREADY[proc] := sentREADY[proc] \cup {READY(m.orig, m.val)};
+    recvINIT[proc] := recvINIT[proc] \union {msg};
+    SendAll("ECHO", msg.orig, msg.val, proc);
+  elsif msg.type = "ECHO" then
+    recvECHO[proc] := recvECHO[proc] \union {msg};
+    if RecvEnough(recvECHO, msg.orig, msg.val, proc, (n + t) \div 2) 
+       /\ READY(msg.orig, msg.val) \notin sentREADY[proc] then
+      SendAll("READY", msg.orig, msg.val, proc);
+      sentREADY[proc] := sentREADY[proc] \cup {READY(msg.orig, msg.val)};
     end if;
-  elsif m.type = "READY" then
-    recvREADY[proc] := recvREADY[proc] \union {m};
+  elsif msg.type = "READY" then
+    recvREADY[proc] := recvREADY[proc] \union {msg};
     \* Condition for amplification (t + 1)
-    if RecvEnough(recvREADY, m.orig, m.val, proc, t) 
-       /\ READY(m.orig, m.val) \notin sentREADY[proc] then
-      SendAll("READY", m.orig, m.val, proc);
-      sentREADY[proc] := sentREADY[proc] \union {READY(m.orig, m.val)};
+    if RecvEnough(recvREADY, msg.orig, msg.val, proc, t) 
+       /\ READY(msg.orig, msg.val) \notin sentREADY[proc] then
+      SendAll("READY", msg.orig, msg.val, proc);
+      sentREADY[proc] := sentREADY[proc] \union {READY(msg.orig, msg.val)};
     end if;
     \* Condition for delivery (2t + 1)
-    if RecvEnough(recvREADY, m.orig, m.val, proc, 2 * t) 
-       /\ ~IsDelivered(m.orig, m.val, proc) then
-      delivered[proc] := Append(delivered[proc], [orig |-> m.orig, val |-> m.val]);
+    if RecvEnough(recvREADY, msg.orig, msg.val, proc, 2 * t) 
+       /\ ~IsDelivered(msg.orig, msg.val, proc) then
+      delivered[proc] := Append(delivered[proc], [orig |-> msg.orig, val |-> msg.val]);
     end if;
   end if;
 end macro;
@@ -184,7 +184,7 @@ begin
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "92723acb" /\ chksum(tla) = "fcc8e0ad")
+\* BEGIN TRANSLATION (chksum(pcal) = "6096269e" /\ chksum(tla) = "bf51706f")
 VARIABLES msgs, processed, sentREADY, recvINIT, recvECHO, recvREADY, 
           delivered, sentValue
 
@@ -194,7 +194,7 @@ ECHO(orig, val)  == [ type |-> "ECHO",  orig |-> orig, val  |-> val ]
 READY(orig, val) == [ type |-> "READY", orig |-> orig, val  |-> val ]
 
 RecvEnough(msgSet, mOrig, mVal, proc, count) ==
-  LET Senders == { m.from : m \in msgSet[proc]
+  LET Senders == { msg.from : msg \in msgSet[proc]
                    \cap [type: {"ECHO", "READY"}, orig: {mOrig}, val: {mVal}] }
   IN
     Cardinality(Senders) > count
@@ -240,7 +240,7 @@ BRB_NoDuplicity ==
 BRB_Termination1 ==
   Correct(Initiator) =>
     \A proc \in CorrectProc :
-      <>(\E m \in Range(delivered[proc]) : m.orig = Initiator)
+      <>(\E msg \in Range(delivered[proc]) : msg.orig = Initiator)
 
 
 
