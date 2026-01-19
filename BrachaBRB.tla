@@ -26,6 +26,7 @@ Correct(p) == p \notin Byzantine
 \* Symmetry set for TLC performance
 Symmetry == Permutations(Proc)
 
+(*================PlusCal definition of Bracha's BRB algorithm================*)
 (*--algorithm BrachaBRB
 
 variables
@@ -44,19 +45,20 @@ define
   ECHO(orig, val)  == [ type |-> "ECHO",  orig |-> orig, val  |-> val ]
   READY(orig, val) == [ type |-> "READY", orig |-> orig, val  |-> val ]
 
+  (* helper to check if we have received enough message from a given set *)
   RecvEnough(msgSet, mOrig, mVal, proc, count) ==
     LET Senders == { msg.from : msg \in msgSet[proc]
-                     \cap [type: {"ECHO", "READY"}, orig: {mOrig}, val: {mVal}] }
+                     \intersect  [type: {"ECHO", "READY"}, orig: {mOrig}, val: {mVal}] }
     IN 
       Cardinality(Senders) > count
 
-  (* Helper to check if a pair exists in a sequence *)
+  (* helper to check if a pair exists in a sequence *)
   IsDelivered(orig, val, proc) ==
     \E i \in 1..Len(delivered[proc]) : 
         delivered[proc][i].orig = orig /\ delivered[proc][i].val = val
 
   (*====Properties====*)
-  (* Type invariant *)
+  (* type invariant *)
   TypeOK ==
     /\ msgs \subseteq [type: {"INIT", "ECHO", "READY"}, from: Proc, to: Proc, orig: Proc, val: Values]
     /\ sentValue \in Values \cup {"NULL"}
@@ -101,7 +103,7 @@ define
         ([orig |-> proc, val |-> v] \in Range(delivered[p1]))
         ~> ([orig |-> proc, val |-> v] \in Range(delivered[p2])) 
   
-  (* Contraints *)
+  (*====Contraints=====*)
   StateConstraint == Cardinality(msgs) < MaxMsgCount
                      /\ \A p \in Proc : Len(delivered[p]) <= 2
 end define;
@@ -112,6 +114,8 @@ macro SendAll(mType, mOrig, mVal, proc) begin
                        orig |-> mOrig, val |-> mVal] : q \in Proc};
 end macro;
 
+(* macro for the algorithm, which is defined as one event handler for each *)
+(* message type received *)
 macro HandleMsg(msg, proc) begin
   processed[proc] := processed[proc] \union {msg};
   if msg.type = "INIT" /\ \neg \E prev \in recvINIT[proc] : prev.orig = msg.orig then
@@ -123,17 +127,17 @@ macro HandleMsg(msg, proc) begin
     if RecvEnough(recvECHO, msg.orig, msg.val, proc, (n + t) \div 2) 
        /\ READY(msg.orig, msg.val) \notin sentREADY[proc] then
       SendAll("READY", msg.orig, msg.val, proc);
-      sentREADY[proc] := sentREADY[proc] \cup {READY(msg.orig, msg.val)};
+      sentREADY[proc] := sentREADY[proc] \union {READY(msg.orig, msg.val)};
     end if;
   elsif msg.type = "READY" then
     recvREADY[proc] := recvREADY[proc] \union {msg};
-    \* Condition for amplification (t + 1)
+    \* condition for amplification (t + 1)
     if RecvEnough(recvREADY, msg.orig, msg.val, proc, t) 
        /\ READY(msg.orig, msg.val) \notin sentREADY[proc] then
       SendAll("READY", msg.orig, msg.val, proc);
       sentREADY[proc] := sentREADY[proc] \union {READY(msg.orig, msg.val)};
     end if;
-    \* Condition for delivery (2t + 1)
+    \* condition for delivery (2t + 1)
     if RecvEnough(recvREADY, msg.orig, msg.val, proc, 2 * t) 
        /\ ~IsDelivered(msg.orig, msg.val, proc) then
       delivered[proc] := Append(delivered[proc], [orig |-> msg.orig, val |-> msg.val]);
@@ -141,14 +145,18 @@ macro HandleMsg(msg, proc) begin
   end if;
 end macro;
 
-fair process p \in (Proc \ Byzantine)
+(* process of the "correct" processes, assumes weak fairness, otherwise *)
+(* it's possible for some process to never progress *) 
+fair process p \in CorrectProc 
 begin
   P_Loop:
     while TRUE do
       either
         \* initial step for the designated Initiator
         if self = Initiator /\ recvINIT[self] = {} then
+          \* if hasn't already sent an INIT message before
           with v \in Values do
+            \* then choose a random value v and broadcast it
             sentValue := v;
             SendAll("INIT", self, v, self);
             recvINIT[self] := {INIT(self, v)};
@@ -163,6 +171,7 @@ begin
     end while;
 end process;
 
+(* Byzantine processes *)
 process b \in Byzantine
 begin
   B_Loop:
@@ -170,13 +179,13 @@ begin
       \* Pick ONE malicious message to add to the network at a time
       with m \in [type : {"INIT", "ECHO", "READY"}, 
                   from : {self}, 
-                  to   : Proc \ Byzantine,  \* No need to send to other bad actors
-                  orig : {self, Initiator}, \* Most attacks focus on the Initiator
+                  to   : Proc \ Byzantine,  \* no need to send to other bad actors
+                  orig : {self, Initiator}, \* most attacks focus on the Initiator
                   val  : Values] do
         if m \notin msgs then
-          msgs := msgs \cup {m};
+          msgs := msgs \union {m};
         else
-          \* If all possible msgs are sent, this process effectively "stalls"
+          \* if all possible msgs are sent, this process effectively "stalls"
           await FALSE; 
         end if;
       end with;
@@ -184,7 +193,7 @@ begin
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "6096269e" /\ chksum(tla) = "bf51706f")
+\* BEGIN TRANSLATION (chksum(pcal) = "6f699959" /\ chksum(tla) = "8af802a7")
 VARIABLES msgs, processed, sentREADY, recvINIT, recvECHO, recvREADY, 
           delivered, sentValue
 
@@ -193,9 +202,10 @@ INIT(orig, val)  == [ type |-> "INIT",  orig |-> orig, val  |-> val ]
 ECHO(orig, val)  == [ type |-> "ECHO",  orig |-> orig, val  |-> val ]
 READY(orig, val) == [ type |-> "READY", orig |-> orig, val  |-> val ]
 
+
 RecvEnough(msgSet, mOrig, mVal, proc, count) ==
   LET Senders == { msg.from : msg \in msgSet[proc]
-                   \cap [type: {"ECHO", "READY"}, orig: {mOrig}, val: {mVal}] }
+                   \intersect  [type: {"ECHO", "READY"}, orig: {mOrig}, val: {mVal}] }
   IN
     Cardinality(Senders) > count
 
@@ -258,7 +268,7 @@ StateConstraint == Cardinality(msgs) < MaxMsgCount
 vars == << msgs, processed, sentREADY, recvINIT, recvECHO, recvREADY, 
            delivered, sentValue >>
 
-ProcSet == ((Proc \ Byzantine)) \cup (Byzantine)
+ProcSet == (CorrectProc) \cup (Byzantine)
 
 Init == (* Global variables *)
         /\ msgs = {}
@@ -293,7 +303,7 @@ p(self) == \/ /\ IF self = Initiator /\ recvINIT[self] = {}
                                                /\ READY(m.orig, m.val) \notin sentREADY[self]
                                                THEN /\ msgs' = (msgs \cup { [type |-> "READY", from |-> self, to |-> q,
                                                                              orig |-> (m.orig), val |-> (m.val)] : q \in Proc})
-                                                    /\ sentREADY' = [sentREADY EXCEPT ![self] = sentREADY[self] \cup {READY(m.orig, m.val)}]
+                                                    /\ sentREADY' = [sentREADY EXCEPT ![self] = sentREADY[self] \union {READY(m.orig, m.val)}]
                                                ELSE /\ TRUE
                                                     /\ UNCHANGED << msgs, 
                                                                     sentREADY >>
@@ -329,18 +339,17 @@ b(self) == /\ \E m \in [type : {"INIT", "ECHO", "READY"},
                         orig : {self, Initiator},
                         val  : Values]:
                 IF m \notin msgs
-                   THEN /\ msgs' = (msgs \cup {m})
+                   THEN /\ msgs' = (msgs \union {m})
                    ELSE /\ FALSE
                         /\ msgs' = msgs
            /\ UNCHANGED << processed, sentREADY, recvINIT, recvECHO, recvREADY, 
                            delivered, sentValue >>
 
-Next == (\E self \in (Proc \ Byzantine): p(self))
+Next == (\E self \in CorrectProc: p(self))
            \/ (\E self \in Byzantine: b(self))
 
 Spec == /\ Init /\ [][Next]_vars
-        /\ \A self \in (Proc \ Byzantine) : WF_vars(p(self))
+        /\ \A self \in CorrectProc : WF_vars(p(self))
 
 \* END TRANSLATION 
-
 ====
