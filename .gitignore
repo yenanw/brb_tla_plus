@@ -6,6 +6,7 @@
 .vscode/
 
 # auto-generated files when running TLC
+*.tlc
 *.out
 states/
 

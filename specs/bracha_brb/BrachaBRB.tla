@@ -6,7 +6,7 @@ CONSTANTS
   Values,      \* broadcast values
   Byzantine,   \* subset of Proc
   Initiator,   \* designated broadcaster
-  MaxMsgCount  \* constaint on the total messages sent to prevent unbounded states
+  ByzBudget    \* how many messages can the Byzantine nodes send
 
 n == Cardinality(Proc)
 t == Cardinality(Byzantine)
@@ -16,41 +16,60 @@ ASSUME
   /\ Initiator \in Proc
   /\ n > 3 * t
 
-(* Helper to treat sequence elements as a set *)
+\* Symmetry set for TLC performance
+Symmetry == Permutations(Proc)
+
+(* =====Type definitions===== *)
+
+MsgTypes == {"INIT","ECHO","READY"}
+\* message payload at the protocol layer, this can be forged
+Msg == [type: MsgTypes, orig: Proc, val: Values]
+\* network packet, we assume the sender/receiver information cannot be forged
+Packet == [from: Proc, to: Proc, payload: Msg]
+
+(* =====Helper operators===== *)
+
+\* Helper to treat sequence elements as a set
 Range(s) == { s[i] : i \in 1..Len(s) }
 
-(* Helper for non-faulty processes *)
+\* Helper for non-faulty processes
 CorrectProc == Proc \ Byzantine
 Correct(p) == p \notin Byzantine
 
-\* Symmetry set for TLC performance
-Symmetry == Permutations(Proc)
+\* Helpers for checking message types given network packet
+IsINIT(packet) == packet.payload.type = "INIT"
+IsECHO(packet) == packet.payload.type = "ECHO"
+IsREADY(packet) == packet.payload.type = "READY"
 
 (*================PlusCal definition of Bracha's BRB algorithm================*)
 (*--algorithm BrachaBRB
 
 variables
-  msgs      = {},                     \* all messages ever sent 
-  processed = [p \in Proc |-> {}],    \* messages processed by each process
-  sentREADY = [p \in Proc |-> {}],    \* READY broadcast
-  recvINIT  = [p \in Proc |-> {}],    \* first INIT seen
-  recvECHO  = [p \in Proc |-> {}],
-  recvREADY = [p \in Proc |-> {}],
-  delivered = [p \in Proc |-> << >>], \* delivered BRB pairs, initialized as a sequence due to integrity
-  sentValue = "NULL";                 \* for tracking the value sent by the initiator
+  \* all packets/messages ever sent in the network
+  messages  = {},
+  \* messages processed by each process
+  processed = [p \in Proc |-> {}],
+  \* delivered messages, initialized as a sequence due to integrity
+  delivered = [p \in Proc |-> << >>],    
 
 define
   (*====Utility functions====*)
-  INIT(orig, val)  == [ type |-> "INIT",  orig |-> orig, val  |-> val ]
-  ECHO(orig, val)  == [ type |-> "ECHO",  orig |-> orig, val  |-> val ]
-  READY(orig, val) == [ type |-> "READY", orig |-> orig, val  |-> val ]
+  INIT(orig, val)  == [ type |-> "INIT",  orig |-> orig, val |-> val ]
+  ECHO(orig, val)  == [ type |-> "ECHO",  orig |-> orig, val |-> val ]
+  READY(orig, val) == [ type |-> "READY", orig |-> orig, val |-> val ]
+
+  (* operators for fetching different messages from each node's message history *)
+  RecvINIT(proc) == { pkt \in processed[proc] : IsINIT(pkt) }
+  RecvECHO(proc) == { pkt \in processed[proc] : IsECHO(pkt) }
+  RecvREADY(proc) == { pkt \in processed[proc] : IsREADY(pkt) }
+  SentREADY(proc) == { pkt \in RecvREADY(proc) : pkt.from = proc } 
+  SentValue == { pkt.payload.val : pkt \in {pkt \in RecvINIT(Initiator) : pkt.from = Initiator} }
 
   (* helper to check if we have received enough message from a given set *)
-  RecvEnough(msgSet, mOrig, mVal, proc, count) ==
-    LET Senders == { msg.from : msg \in msgSet[proc]
-                     \intersect  [type: {"ECHO", "READY"}, orig: {mOrig}, val: {mVal}] }
+  RecvEnough(packets, msg, count) ==
+    LET senders == { pkt.from : pkt \in { pkt \in packets : pkt.payload = msg } }
     IN 
-      Cardinality(Senders) > count
+      Cardinality(senders) > count
 
   (* helper to check if a pair exists in a sequence *)
   IsDelivered(orig, val, proc) ==
@@ -60,26 +79,27 @@ define
   (*====Properties====*)
   (* type invariant *)
   TypeOK ==
-    /\ msgs \subseteq [type: {"INIT", "ECHO", "READY"}, from: Proc, to: Proc, orig: Proc, val: Values]
-    /\ sentValue \in Values \cup {"NULL"}
-    /\ \A p \in Proc : Len(delivered[p]) <= Cardinality(Proc)
+    /\ messages \subseteq Packet  
+    /\ \A proc \in Proc :
+        /\ processed[proc] \subseteq Packet
+        /\ delivered[proc] \in Seq([orig: Proc, val: Values])
 
   (* The following properties follow the definitions in the book:
      "Fault-Tolerant Message-Passing Distributed Systems" by M. Raynal *)
   (*----------------------------------------------------------------------*)
-  (* BRB-integrity: No correct process delivers a message more than once. *)
-  BRB_Integrity ==
-    \A proc \in CorrectProc :
-      \A i, j \in 1..Len(delivered[proc]) :
-        (i /= j) => (delivered[proc][i] /= delivered[proc][j])
-  
   (* BRB-validity: If a non-faulty process delivers from a correct Initiator, 
      it must match what the Initiator actually sent. *)
   BRB_Validity == 
     \A proc \in CorrectProc :
       \A i \in 1..Len(delivered[proc]) :
         (delivered[proc][i].orig = Initiator /\ Correct(Initiator)) => 
-          (delivered[proc][i].val = sentValue)
+          (delivered[proc][i].val \in SentValue)
+
+  (* BRB-integrity: No correct process delivers a message more than once. *)
+  BRB_Integrity ==
+    \A proc \in CorrectProc :
+      \A i, j \in 1..Len(delivered[proc]) :
+        (i /= j) => (delivered[proc][i] /= delivered[proc][j])
   
   (* BRB-no-duplicity: No two non-faulty processes deliver distinct messages 
      from the same sender (even if that sender is Byzantine). *)
@@ -93,7 +113,7 @@ define
   BRB_Termination1 ==
     Correct(Initiator) => 
       \A proc \in CorrectProc :
-        <>(\E msg \in Range(delivered[proc]) : msg.orig = Initiator)
+        <>(\E msg \in Range(delivered[proc]) : msg.orig = Initiator /\ msg.val \in SentValue)
   
   (* BRB-termination-2: If a non-faulty process delivers a message from
      any p_i (possibly faulty), then all non-faulty processes eventually deliver from p_i. *)
@@ -102,72 +122,79 @@ define
       \A proc \in Proc, v \in Values :
         ([orig |-> proc, val |-> v] \in Range(delivered[p1]))
         ~> ([orig |-> proc, val |-> v] \in Range(delivered[p2])) 
-  
-  (*====Contraints=====*)
-  StateConstraint == Cardinality(msgs) < MaxMsgCount
-                     /\ \A p \in Proc : Len(delivered[p]) <= 2
 end define;
 
 (* simple broadcast macro *)
-macro SendAll(mType, mOrig, mVal, proc) begin
-  msgs := msgs \cup { [type |-> mType, from |-> proc, to |-> q,
-                       orig |-> mOrig, val |-> mVal] : q \in Proc};
+macro SendAll(proc, msg) begin
+  messages := messages \union 
+    { [ from |-> proc, to |-> q, payload |-> msg ] : q \in Proc };
 end macro;
 
-(* macro for the algorithm, which is defined as one event handler for each *)
-(* message type received *)
-macro HandleMsg(msg, proc) begin
-  processed[proc] := processed[proc] \union {msg};
-  if msg.type = "INIT" /\ \neg \E prev \in recvINIT[proc] : prev.orig = msg.orig then
-    (* check that it's the FIRST time we received INIT from a process *)
-    recvINIT[proc] := recvINIT[proc] \union {msg};
-    SendAll("ECHO", msg.orig, msg.val, proc);
-  elsif msg.type = "ECHO" then
-    recvECHO[proc] := recvECHO[proc] \union {msg};
-    if RecvEnough(recvECHO, msg.orig, msg.val, proc, (n + t) \div 2) 
-       /\ READY(msg.orig, msg.val) \notin sentREADY[proc] then
-      SendAll("READY", msg.orig, msg.val, proc);
-      sentREADY[proc] := sentREADY[proc] \union {READY(msg.orig, msg.val)};
+(* macros for the algorithm *)
+macro HandleINIT(proc, pkt) begin
+  with msg = pkt.payload do
+    (* check that it's the FIRST time we received INIT(orig, -) *)
+    if \neg (\E prev \in RecvINIT(proc) : prev.payload.orig = msg.orig) then
+      SendAll(proc, ECHO(msg.orig, msg.val));
     end if;
-  elsif msg.type = "READY" then
-    recvREADY[proc] := recvREADY[proc] \union {msg};
+  end with;
+end macro;
+
+macro HandleECHO(proc, pkt) begin
+  with msg = pkt.payload, readyMsg = READY(msg.orig, msg.val) do
+    \* we use (n+t+1)/2 because we want to round up the quorum threshold
+    if RecvEnough(RecvECHO(proc), msg, (n + t + 1) \div 2) 
+       /\ readyMsg \notin SentREADY(proc) then
+      SendAll(proc, readyMsg);
+    end if;
+  end with;
+end macro;
+
+macro HandleREADY(proc, pkt) begin
+  with msg = pkt.payload do
     \* condition for amplification (t + 1)
-    if RecvEnough(recvREADY, msg.orig, msg.val, proc, t) 
-       /\ READY(msg.orig, msg.val) \notin sentREADY[proc] then
-      SendAll("READY", msg.orig, msg.val, proc);
-      sentREADY[proc] := sentREADY[proc] \union {READY(msg.orig, msg.val)};
+    if RecvEnough(RecvREADY(proc), msg, t) /\ msg \notin SentREADY(proc) then
+      SendAll(proc, msg);
     end if;
+
     \* condition for delivery (2t + 1)
-    if RecvEnough(recvREADY, msg.orig, msg.val, proc, 2 * t) 
+    if RecvEnough(RecvREADY(proc), msg, 2 * t) 
        /\ ~IsDelivered(msg.orig, msg.val, proc) then
       delivered[proc] := Append(delivered[proc], [orig |-> msg.orig, val |-> msg.val]);
     end if;
-  end if;
+  end with;
 end macro;
 
-(* process of the "correct" processes, assumes weak fairness, otherwise *)
+(* process of the correct nodes, assumes weak fairness, otherwise *)
 (* it's possible for some process to never progress *) 
 fair process p \in CorrectProc 
 begin
+  P_Init:
+    \* initial step for the designated Initiator, only correct node follows it
+    if self = Initiator then
+      with v \in Values do
+        \* choose a random value v and broadcast it
+        SendAll(self, INIT(self, v));
+      end with;
+    end if;
+
   P_Loop:
-    while TRUE do
-      either
-        \* initial step for the designated Initiator
-        if self = Initiator /\ recvINIT[self] = {} then
-          \* if hasn't already sent an INIT message before
-          with v \in Values do
-            \* then choose a random value v and broadcast it
-            sentValue := v;
-            SendAll("INIT", self, v, self);
-            recvINIT[self] := {INIT(self, v)};
-          end with;
+    \* in single-shot BRB, nodes stop after their first "deliver"
+    while Len(delivered[self]) = 0 do
+      \* process any message to p that hasn't been processed yet
+      with pkt \in {pkt \in messages : pkt.to = self /\ pkt \notin processed[self]} do
+        processed[self] := processed[self] \union {pkt};
+        \* process each message depending on its type
+        if IsINIT(pkt) then
+          HandleINIT(self, pkt);
+        elsif IsECHO(pkt) then
+          HandleECHO(self, pkt);
+        elsif IsREADY(pkt) then
+          HandleREADY(self, pkt);
+        else
+          skip; \* discard the message since it's not a valid one
         end if;
-      or
-        \* process any message to p that hasn't been processed yet
-        with m \in {msg \in msgs : msg.to = self /\ msg \notin processed[self]} do
-          HandleMsg(m, self);
-        end with;
-      end either;
+      end with;
     end while;
 end process;
 
@@ -175,39 +202,38 @@ end process;
 process b \in Byzantine
 begin
   B_Loop:
-    while TRUE do
-      \* Pick ONE malicious message to add to the network at a time
-      with m \in [type : {"INIT", "ECHO", "READY"}, 
-                  from : {self}, 
-                  to   : Proc \ Byzantine,  \* no need to send to other bad actors
-                  orig : {self, Initiator}, \* most attacks focus on the Initiator
-                  val  : Values] do
-        if m \notin msgs then
-          msgs := msgs \union {m};
-        else
-          \* if all possible msgs are sent, this process effectively "stalls"
-          await FALSE; 
-        end if;
+    \* stop the Byzantine processes once all corrected processors have delivered
+    while \E proc \in CorrectProc : Len(delivered[proc]) = 0 do
+      \* pick a random set of messages to add to the network
+      with pkts \in SUBSET [ from : {self},
+                             to : CorrectProc,
+                             payload : Msg ] do
+        messages := messages \union pkts;
       end with;
     end while;
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "6f699959" /\ chksum(tla) = "8af802a7")
-VARIABLES msgs, processed, sentREADY, recvINIT, recvECHO, recvREADY, 
-          delivered, sentValue
+\* BEGIN TRANSLATION (chksum(pcal) = "4106e07" /\ chksum(tla) = "7338b2bf")
+VARIABLES pc, messages, processed, delivered
 
 (* define statement *)
-INIT(orig, val)  == [ type |-> "INIT",  orig |-> orig, val  |-> val ]
-ECHO(orig, val)  == [ type |-> "ECHO",  orig |-> orig, val  |-> val ]
-READY(orig, val) == [ type |-> "READY", orig |-> orig, val  |-> val ]
+INIT(orig, val)  == [ type |-> "INIT",  orig |-> orig, val |-> val ]
+ECHO(orig, val)  == [ type |-> "ECHO",  orig |-> orig, val |-> val ]
+READY(orig, val) == [ type |-> "READY", orig |-> orig, val |-> val ]
 
 
-RecvEnough(msgSet, mOrig, mVal, proc, count) ==
-  LET Senders == { msg.from : msg \in msgSet[proc]
-                   \intersect  [type: {"ECHO", "READY"}, orig: {mOrig}, val: {mVal}] }
+RecvINIT(proc) == { pkt \in processed[proc] : IsINIT(pkt) }
+RecvECHO(proc) == { pkt \in processed[proc] : IsECHO(pkt) }
+RecvREADY(proc) == { pkt \in processed[proc] : IsREADY(pkt) }
+SentREADY(proc) == { pkt \in RecvREADY(proc) : pkt.from = proc }
+SentValue == { pkt.payload.val : pkt \in {pkt \in RecvINIT(Initiator) : pkt.from = Initiator} }
+
+
+RecvEnough(packets, msg, count) ==
+  LET senders == { pkt.from : pkt \in { pkt \in packets : pkt.payload = msg } }
   IN
-    Cardinality(Senders) > count
+    Cardinality(senders) > count
 
 
 IsDelivered(orig, val, proc) ==
@@ -217,18 +243,13 @@ IsDelivered(orig, val, proc) ==
 
 
 TypeOK ==
-  /\ msgs \subseteq [type: {"INIT", "ECHO", "READY"}, from: Proc, to: Proc, orig: Proc, val: Values]
-  /\ sentValue \in Values \cup {"NULL"}
-  /\ \A p \in Proc : Len(delivered[p]) <= Cardinality(Proc)
+  /\ messages \subseteq Packet
+  /\ \A proc \in Proc :
+      /\ processed[proc] \subseteq Packet
+      /\ delivered[proc] \in Seq([orig: Proc, val: Values])
 
 
 
-
-
-BRB_Integrity ==
-  \A proc \in CorrectProc :
-    \A i, j \in 1..Len(delivered[proc]) :
-      (i /= j) => (delivered[proc][i] /= delivered[proc][j])
 
 
 
@@ -236,7 +257,13 @@ BRB_Validity ==
   \A proc \in CorrectProc :
     \A i \in 1..Len(delivered[proc]) :
       (delivered[proc][i].orig = Initiator /\ Correct(Initiator)) =>
-        (delivered[proc][i].val = sentValue)
+        (delivered[proc][i].val \in SentValue)
+
+
+BRB_Integrity ==
+  \A proc \in CorrectProc :
+    \A i, j \in 1..Len(delivered[proc]) :
+      (i /= j) => (delivered[proc][i] /= delivered[proc][j])
 
 
 
@@ -250,7 +277,7 @@ BRB_NoDuplicity ==
 BRB_Termination1 ==
   Correct(Initiator) =>
     \A proc \in CorrectProc :
-      <>(\E msg \in Range(delivered[proc]) : msg.orig = Initiator)
+      <>(\E msg \in Range(delivered[proc]) : msg.orig = Initiator /\ msg.val \in SentValue)
 
 
 
@@ -261,95 +288,96 @@ BRB_Termination2 ==
       ~> ([orig |-> proc, val |-> v] \in Range(delivered[p2]))
 
 
-StateConstraint == Cardinality(msgs) < MaxMsgCount
-                   /\ \A p \in Proc : Len(delivered[p]) <= 2
-
-
-vars == << msgs, processed, sentREADY, recvINIT, recvECHO, recvREADY, 
-           delivered, sentValue >>
+vars == << pc, messages, processed, delivered >>
 
 ProcSet == (CorrectProc) \cup (Byzantine)
 
 Init == (* Global variables *)
-        /\ msgs = {}
+        /\ messages = {}
         /\ processed = [p \in Proc |-> {}]
-        /\ sentREADY = [p \in Proc |-> {}]
-        /\ recvINIT = [p \in Proc |-> {}]
-        /\ recvECHO = [p \in Proc |-> {}]
-        /\ recvREADY = [p \in Proc |-> {}]
         /\ delivered = [p \in Proc |-> << >>]
-        /\ sentValue = "NULL"
+        /\ pc = [self \in ProcSet |-> CASE self \in CorrectProc -> "P_Init"
+                                        [] self \in Byzantine -> "B_Loop"]
 
-p(self) == \/ /\ IF self = Initiator /\ recvINIT[self] = {}
-                    THEN /\ \E v \in Values:
-                              /\ sentValue' = v
-                              /\ msgs' = (msgs \cup { [type |-> "INIT", from |-> self, to |-> q,
-                                                       orig |-> self, val |-> v] : q \in Proc})
-                              /\ recvINIT' = [recvINIT EXCEPT ![self] = {INIT(self, v)}]
-                    ELSE /\ TRUE
-                         /\ UNCHANGED << msgs, recvINIT, sentValue >>
-              /\ UNCHANGED <<processed, sentREADY, recvECHO, recvREADY, delivered>>
-           \/ /\ \E m \in {msg \in msgs : msg.to = self /\ msg \notin processed[self]}:
-                   /\ processed' = [processed EXCEPT ![self] = processed[self] \union {m}]
-                   /\ IF m.type = "INIT" /\ \neg \E prev \in recvINIT[self] : prev.orig = m.orig
-                         THEN /\ recvINIT' = [recvINIT EXCEPT ![self] = recvINIT[self] \union {m}]
-                              /\ msgs' = (msgs \cup { [type |-> "ECHO", from |-> self, to |-> q,
-                                                       orig |-> (m.orig), val |-> (m.val)] : q \in Proc})
-                              /\ UNCHANGED << sentREADY, recvECHO, 
-                                              recvREADY, delivered >>
-                         ELSE /\ IF m.type = "ECHO"
-                                    THEN /\ recvECHO' = [recvECHO EXCEPT ![self] = recvECHO[self] \union {m}]
-                                         /\ IF RecvEnough(recvECHO', m.orig, m.val, self, (n + t) \div 2)
-                                               /\ READY(m.orig, m.val) \notin sentREADY[self]
-                                               THEN /\ msgs' = (msgs \cup { [type |-> "READY", from |-> self, to |-> q,
-                                                                             orig |-> (m.orig), val |-> (m.val)] : q \in Proc})
-                                                    /\ sentREADY' = [sentREADY EXCEPT ![self] = sentREADY[self] \union {READY(m.orig, m.val)}]
-                                               ELSE /\ TRUE
-                                                    /\ UNCHANGED << msgs, 
-                                                                    sentREADY >>
-                                         /\ UNCHANGED << recvREADY, 
-                                                         delivered >>
-                                    ELSE /\ IF m.type = "READY"
-                                               THEN /\ recvREADY' = [recvREADY EXCEPT ![self] = recvREADY[self] \union {m}]
-                                                    /\ IF RecvEnough(recvREADY', m.orig, m.val, self, t)
-                                                          /\ READY(m.orig, m.val) \notin sentREADY[self]
-                                                          THEN /\ msgs' = (msgs \cup { [type |-> "READY", from |-> self, to |-> q,
-                                                                                        orig |-> (m.orig), val |-> (m.val)] : q \in Proc})
-                                                               /\ sentREADY' = [sentREADY EXCEPT ![self] = sentREADY[self] \union {READY(m.orig, m.val)}]
-                                                          ELSE /\ TRUE
-                                                               /\ UNCHANGED << msgs, 
-                                                                               sentREADY >>
-                                                    /\ IF RecvEnough(recvREADY', m.orig, m.val, self, 2 * t)
-                                                          /\ ~IsDelivered(m.orig, m.val, self)
-                                                          THEN /\ delivered' = [delivered EXCEPT ![self] = Append(delivered[self], [orig |-> m.orig, val |-> m.val])]
-                                                          ELSE /\ TRUE
-                                                               /\ UNCHANGED delivered
-                                               ELSE /\ TRUE
-                                                    /\ UNCHANGED << msgs, 
-                                                                    sentREADY, 
-                                                                    recvREADY, 
-                                                                    delivered >>
-                                         /\ UNCHANGED recvECHO
-                              /\ UNCHANGED recvINIT
-              /\ UNCHANGED sentValue
+P_Init(self) == /\ pc[self] = "P_Init"
+                /\ IF self = Initiator
+                      THEN /\ \E v \in Values:
+                                messages' = (          messages \union
+                                             { [ from |-> self, to |-> q, payload |-> (INIT(self, v)) ] : q \in Proc })
+                      ELSE /\ TRUE
+                           /\ UNCHANGED messages
+                /\ pc' = [pc EXCEPT ![self] = "P_Loop"]
+                /\ UNCHANGED << processed, delivered >>
 
-b(self) == /\ \E m \in [type : {"INIT", "ECHO", "READY"},
-                        from : {self},
-                        to   : Proc \ Byzantine,
-                        orig : {self, Initiator},
-                        val  : Values]:
-                IF m \notin msgs
-                   THEN /\ msgs' = (msgs \union {m})
-                   ELSE /\ FALSE
-                        /\ msgs' = msgs
-           /\ UNCHANGED << processed, sentREADY, recvINIT, recvECHO, recvREADY, 
-                           delivered, sentValue >>
+P_Loop(self) == /\ pc[self] = "P_Loop"
+                /\ IF Len(delivered[self]) = 0
+                      THEN /\ \E pkt \in {pkt \in messages : pkt.to = self /\ pkt \notin processed[self]}:
+                                /\ processed' = [processed EXCEPT ![self] = processed[self] \union {pkt}]
+                                /\ IF IsINIT(pkt)
+                                      THEN /\ LET msg == pkt.payload IN
+                                                IF \neg (\E prev \in RecvINIT(self) : prev.payload.orig = msg.orig)
+                                                   THEN /\ messages' = (          messages \union
+                                                                        { [ from |-> self, to |-> q, payload |-> (ECHO(msg.orig, msg.val)) ] : q \in Proc })
+                                                   ELSE /\ TRUE
+                                                        /\ UNCHANGED messages
+                                           /\ UNCHANGED delivered
+                                      ELSE /\ IF IsECHO(pkt)
+                                                 THEN /\ LET msg == pkt.payload IN
+                                                           LET readyMsg == READY(msg.orig, msg.val) IN
+                                                             IF RecvEnough(RecvECHO(self), msg, (n + t + 1) \div 2)
+                                                                /\ readyMsg \notin SentREADY(self)
+                                                                THEN /\ messages' = (          messages \union
+                                                                                     { [ from |-> self, to |-> q, payload |-> readyMsg ] : q \in Proc })
+                                                                ELSE /\ TRUE
+                                                                     /\ UNCHANGED messages
+                                                      /\ UNCHANGED delivered
+                                                 ELSE /\ IF IsREADY(pkt)
+                                                            THEN /\ LET msg == pkt.payload IN
+                                                                      /\ IF RecvEnough(RecvREADY(self), msg, t) /\ msg \notin SentREADY(self)
+                                                                            THEN /\ messages' = (          messages \union
+                                                                                                 { [ from |-> self, to |-> q, payload |-> msg ] : q \in Proc })
+                                                                            ELSE /\ TRUE
+                                                                                 /\ UNCHANGED messages
+                                                                      /\ IF RecvEnough(RecvREADY(self), msg, 2 * t)
+                                                                            /\ ~IsDelivered(msg.orig, msg.val, self)
+                                                                            THEN /\ delivered' = [delivered EXCEPT ![self] = Append(delivered[self], [orig |-> msg.orig, val |-> msg.val])]
+                                                                            ELSE /\ TRUE
+                                                                                 /\ UNCHANGED delivered
+                                                            ELSE /\ TRUE
+                                                                 /\ UNCHANGED << messages, 
+                                                                                 delivered >>
+                           /\ pc' = [pc EXCEPT ![self] = "P_Loop"]
+                      ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
+                           /\ UNCHANGED << messages, processed, delivered >>
+
+p(self) == P_Init(self) \/ P_Loop(self)
+
+B_Loop(self) == /\ pc[self] = "B_Loop"
+                /\ IF \E proc \in CorrectProc : Len(delivered[proc]) = 0
+                      THEN /\ \E pkts \in SUBSET [ from : {self},
+                                                   to : CorrectProc,
+                                                   payload : Msg ]:
+                                messages' = (messages \union pkts)
+                           /\ pc' = [pc EXCEPT ![self] = "B_Loop"]
+                      ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
+                           /\ UNCHANGED messages
+                /\ UNCHANGED << processed, delivered >>
+
+b(self) == B_Loop(self)
+
+(* Allow infinite stuttering to prevent deadlock on termination. *)
+Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
+               /\ UNCHANGED vars
 
 Next == (\E self \in CorrectProc: p(self))
            \/ (\E self \in Byzantine: b(self))
+           \/ Terminating
 
 Spec == /\ Init /\ [][Next]_vars
         /\ \A self \in CorrectProc : WF_vars(p(self))
 
+Termination == <>(\A self \in ProcSet: pc[self] = "Done")
+
 \* END TRANSLATION 
+
 ====
