@@ -64,6 +64,9 @@ define
   RecvREADY(proc) == { pkt \in processed[proc] : IsREADY(pkt) }
   SentREADY(proc) == { pkt \in RecvREADY(proc) : pkt.from = proc } 
   SentValue == { pkt.payload.val : pkt \in {pkt \in RecvINIT(Initiator) : pkt.from = Initiator} }
+  
+  (* find how many messages has a node sent *)
+  SentMsgs(proc) == { pkt \in messages : pkt.from = proc }
 
   (* helper to check if we have received enough message from a given set *)
   RecvEnough(packets, msg, count) ==
@@ -203,18 +206,20 @@ process b \in Byzantine
 begin
   B_Loop:
     \* stop the Byzantine processes once all corrected processors have delivered
-    while \E proc \in CorrectProc : Len(delivered[proc]) = 0 do
-      \* pick a random set of messages to add to the network
-      with pkts \in SUBSET [ from : {self},
-                             to : CorrectProc,
-                             payload : Msg ] do
-        messages := messages \union pkts;
+    \* or if it has sent `ByzBudget` number of messages
+    while /\ \E proc \in CorrectProc : Len(delivered[proc]) = 0 
+          /\ Cardinality(SentMsgs(self)) < ByzBudget do
+      \* pick a random message to add to the network
+      with pkt \in [ from : {self},
+                     to : CorrectProc,
+                     payload : Msg ] do
+        messages := messages \union {pkt};
       end with;
     end while;
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "4106e07" /\ chksum(tla) = "7338b2bf")
+\* BEGIN TRANSLATION (chksum(pcal) = "6949cfea" /\ chksum(tla) = "a79ea51d")
 VARIABLES pc, messages, processed, delivered
 
 (* define statement *)
@@ -228,6 +233,9 @@ RecvECHO(proc) == { pkt \in processed[proc] : IsECHO(pkt) }
 RecvREADY(proc) == { pkt \in processed[proc] : IsREADY(pkt) }
 SentREADY(proc) == { pkt \in RecvREADY(proc) : pkt.from = proc }
 SentValue == { pkt.payload.val : pkt \in {pkt \in RecvINIT(Initiator) : pkt.from = Initiator} }
+
+
+SentMsgs(proc) == { pkt \in messages : pkt.from = proc }
 
 
 RecvEnough(packets, msg, count) ==
@@ -353,11 +361,12 @@ P_Loop(self) == /\ pc[self] = "P_Loop"
 p(self) == P_Init(self) \/ P_Loop(self)
 
 B_Loop(self) == /\ pc[self] = "B_Loop"
-                /\ IF \E proc \in CorrectProc : Len(delivered[proc]) = 0
-                      THEN /\ \E pkts \in SUBSET [ from : {self},
-                                                   to : CorrectProc,
-                                                   payload : Msg ]:
-                                messages' = (messages \union pkts)
+                /\ IF /\ \E proc \in CorrectProc : Len(delivered[proc]) = 0
+                      /\ Cardinality(SentMsgs(self)) < ByzBudget
+                      THEN /\ \E pkt \in [ from : {self},
+                                           to : CorrectProc,
+                                           payload : Msg ]:
+                                messages' = (messages \union {pkt})
                            /\ pc' = [pc EXCEPT ![self] = "B_Loop"]
                       ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
                            /\ UNCHANGED messages
