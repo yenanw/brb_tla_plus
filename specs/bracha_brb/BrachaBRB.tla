@@ -224,15 +224,20 @@ begin
     while Cardinality(SentMsgs(self)) < ByzBudget do
       \* pick a random message to add to the network
       with pkt \in [ from : {self},
-                     to : Proc,
-                     payload : Msg ] do
+                     to : CorrectProc,
+                     \* not much point forging messages not from the Initiator
+                     payload : [
+                        type: MsgTypes,
+                        orig: {Initiator},
+                        val: Values
+                     ] ] do
         messages := messages \union {pkt};
       end with;
     end while;
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "807cec10" /\ chksum(tla) = "bbb3db16")
+\* BEGIN TRANSLATION (chksum(pcal) = "660329a6" /\ chksum(tla) = "d77bcdb1")
 VARIABLES pc, messages, processed, delivered, sentREADY, sentMsg, initSent
 
 (* define statement *)
@@ -388,8 +393,13 @@ p(self) == P_Init(self) \/ P_Loop(self)
 B_Loop(self) == /\ pc[self] = "B_Loop"
                 /\ IF Cardinality(SentMsgs(self)) < ByzBudget
                       THEN /\ \E pkt \in [ from : {self},
-                                           to : Proc,
-                                           payload : Msg ]:
+                                           to : CorrectProc,
+                                         
+                                           payload : [
+                                              type: MsgTypes,
+                                              orig: {Initiator},
+                                              val: Values
+                                           ] ]:
                                 messages' = (messages \union {pkt})
                            /\ pc' = [pc EXCEPT ![self] = "B_Loop"]
                       ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
