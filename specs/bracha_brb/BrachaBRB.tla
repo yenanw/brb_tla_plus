@@ -233,7 +233,7 @@ begin
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "b6e4177c" /\ chksum(tla) = "31d212f8")
+\* BEGIN TRANSLATION (chksum(pcal) = "3b3f3cbe" /\ chksum(tla) = "1947afd7")
 VARIABLES pc, messages, processed, delivered, sentREADY, sentMsg
 
 (* define statement *)
@@ -291,19 +291,6 @@ BRB_NoDuplicity ==
   \A proc1, proc2 \in CorrectProc :
     \A m1 \in Range(delivered[proc1]), m2 \in Range(delivered[proc2]) :
       (m1.orig = m2.orig) => (m1.val = m2.val)
-
-Test_Prop1 ==
-  \A proc \in CorrectProc:
-    delivered[proc] = << >>
-Test_Prop2 ==
-  \A proc \in CorrectProc:
-    \A pkt \in processed[proc]:
-      TRUE
-Test_Prop3 ==
-  \A proc \in CorrectProc:
-    \A pkt \in processed[proc]:
-      TRUE
-
 
 
 
