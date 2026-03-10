@@ -57,8 +57,6 @@ variables
   sentREADY = [p \in Proc |-> {}],
   \* tracks the msg sent by the Initiator, only used for property checking
   sentMsg = NULL,
-  \* limits correct Initiator to only one INIT sent as we consider single-shot
-  initSent = FALSE,
 
 define
   (*====Utility functions====*)
@@ -76,7 +74,7 @@ define
 
   (* helper to count the number of messages like msg received *)
   RecvCount(packets, msg) ==
-    Cardinality({ pkt.from : pkt \in { pkt \in packets : pkt.payload = msg } })
+    Cardinality({ pkt \in packets : pkt.payload = msg })
 
   (* helper to check if a pair exists in a sequence *)
   IsDelivered(orig, val, proc) ==
@@ -92,7 +90,6 @@ define
         /\ delivered[proc] \in Seq([orig: Proc, val: Values])
         /\ sentREADY[proc] \subseteq Msg
         /\ sentMsg \in Msg \/ sentMsg = NULL
-        /\ initSent \in BOOLEAN
 
   (* The following properties follow the definitions in the book:
      "Fault-Tolerant Message-Passing Distributed Systems" by M. Raynal *)
@@ -103,7 +100,7 @@ define
     \A proc \in CorrectProc :
       \A i \in 1..Len(delivered[proc]) :
         (delivered[proc][i].orig = Initiator /\ Correct(Initiator)) => 
-          (delivered[proc][i] = sentMsg)
+          (delivered[proc][i].val = sentMsg.val)
 
   (* BRB-integrity: No correct process delivers a message more than once. *)
   BRB_Integrity ==
@@ -114,8 +111,8 @@ define
   (* BRB-no-duplicity: No two non-faulty processes deliver distinct messages 
      from the same sender (even if that sender is Byzantine). *)
   BRB_NoDuplicity ==
-    \A p1, p2 \in CorrectProc :
-      \A m1 \in Range(delivered[p1]),  m2 \in Range(delivered[p2]) :
+    \A proc1, proc2 \in CorrectProc :
+      \A m1 \in Range(delivered[proc1]), m2 \in Range(delivered[proc2]) :
         (m1.orig = m2.orig) => (m1.val = m2.val)
 
   (* BRB-termination-1: If the sender is non-faulty, all non-faulty processes
@@ -188,12 +185,11 @@ fair process p \in CorrectProc
 begin
   P_Init:
     \* initial step for the designated Initiator, only correct node follows it
-    if self = Initiator /\ ~initSent then
+    if self = Initiator then
       with v \in Values, msg = INIT(self, v) do
         \* choose a random value v and broadcast it
         SendAll(self, msg);
         sentMsg := msg;
-        initSent := TRUE;
       end with;
     end if;
 
@@ -221,7 +217,7 @@ process b \in Byzantine
 begin
   B_Loop:
     \* stop the Byzantine processes once the budget is consumed 
-    while Cardinality(SentMsgs(self)) < ByzBudget do
+    while Cardinality(SentMsgs(self)) <= ByzBudget do
       \* pick a random message to add to the network
       with pkt \in [ from : {self},
                      to : CorrectProc,
@@ -237,8 +233,8 @@ begin
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "660329a6" /\ chksum(tla) = "d77bcdb1")
-VARIABLES pc, messages, processed, delivered, sentREADY, sentMsg, initSent
+\* BEGIN TRANSLATION (chksum(pcal) = "b6e4177c" /\ chksum(tla) = "31d212f8")
+VARIABLES pc, messages, processed, delivered, sentREADY, sentMsg
 
 (* define statement *)
 INIT(orig, val)  == [ type |-> "INIT",  orig |-> orig, val |-> val ]
@@ -255,7 +251,7 @@ SentMsgs(proc) == { pkt \in messages : pkt.from = proc }
 
 
 RecvCount(packets, msg) ==
-  Cardinality({ pkt.from : pkt \in { pkt \in packets : pkt.payload = msg } })
+  Cardinality({ pkt \in packets : pkt.payload = msg })
 
 
 IsDelivered(orig, val, proc) ==
@@ -271,7 +267,6 @@ TypeOK ==
       /\ delivered[proc] \in Seq([orig: Proc, val: Values])
       /\ sentREADY[proc] \subseteq Msg
       /\ sentMsg \in Msg \/ sentMsg = NULL
-      /\ initSent \in BOOLEAN
 
 
 
@@ -282,7 +277,7 @@ BRB_Validity ==
   \A proc \in CorrectProc :
     \A i \in 1..Len(delivered[proc]) :
       (delivered[proc][i].orig = Initiator /\ Correct(Initiator)) =>
-        (delivered[proc][i] = sentMsg)
+        (delivered[proc][i].val = sentMsg.val)
 
 
 BRB_Integrity ==
@@ -293,9 +288,22 @@ BRB_Integrity ==
 
 
 BRB_NoDuplicity ==
-  \A p1, p2 \in CorrectProc :
-    \A m1 \in Range(delivered[p1]),  m2 \in Range(delivered[p2]) :
+  \A proc1, proc2 \in CorrectProc :
+    \A m1 \in Range(delivered[proc1]), m2 \in Range(delivered[proc2]) :
       (m1.orig = m2.orig) => (m1.val = m2.val)
+
+Test_Prop1 ==
+  \A proc \in CorrectProc:
+    delivered[proc] = << >>
+Test_Prop2 ==
+  \A proc \in CorrectProc:
+    \A pkt \in processed[proc]:
+      TRUE
+Test_Prop3 ==
+  \A proc \in CorrectProc:
+    \A pkt \in processed[proc]:
+      TRUE
+
 
 
 
@@ -313,8 +321,7 @@ BRB_Termination2 ==
       ~> ([orig |-> proc, val |-> v] \in Range(delivered[p2]))
 
 
-vars == << pc, messages, processed, delivered, sentREADY, sentMsg, initSent
-        >>
+vars == << pc, messages, processed, delivered, sentREADY, sentMsg >>
 
 ProcSet == (CorrectProc) \cup (Byzantine)
 
@@ -324,20 +331,18 @@ Init == (* Global variables *)
         /\ delivered = [p \in Proc |-> << >>]
         /\ sentREADY = [p \in Proc |-> {}]
         /\ sentMsg = NULL
-        /\ initSent = FALSE
         /\ pc = [self \in ProcSet |-> CASE self \in CorrectProc -> "P_Init"
                                         [] self \in Byzantine -> "B_Loop"]
 
 P_Init(self) == /\ pc[self] = "P_Init"
-                /\ IF self = Initiator /\ ~initSent
+                /\ IF self = Initiator
                       THEN /\ \E v \in Values:
                                 LET msg == INIT(self, v) IN
                                   /\ messages' = (          messages \union
                                                   { [ from |-> self, to |-> q, payload |-> msg ] : q \in Proc })
                                   /\ sentMsg' = msg
-                                  /\ initSent' = TRUE
                       ELSE /\ TRUE
-                           /\ UNCHANGED << messages, sentMsg, initSent >>
+                           /\ UNCHANGED << messages, sentMsg >>
                 /\ pc' = [pc EXCEPT ![self] = "P_Loop"]
                 /\ UNCHANGED << processed, delivered, sentREADY >>
 
@@ -386,12 +391,12 @@ P_Loop(self) == /\ pc[self] = "P_Loop"
                                                                       delivered, 
                                                                       sentREADY >>
                 /\ pc' = [pc EXCEPT ![self] = "P_Loop"]
-                /\ UNCHANGED << sentMsg, initSent >>
+                /\ UNCHANGED sentMsg
 
 p(self) == P_Init(self) \/ P_Loop(self)
 
 B_Loop(self) == /\ pc[self] = "B_Loop"
-                /\ IF Cardinality(SentMsgs(self)) < ByzBudget
+                /\ IF Cardinality(SentMsgs(self)) <= ByzBudget
                       THEN /\ \E pkt \in [ from : {self},
                                            to : CorrectProc,
                                          
@@ -404,8 +409,7 @@ B_Loop(self) == /\ pc[self] = "B_Loop"
                            /\ pc' = [pc EXCEPT ![self] = "B_Loop"]
                       ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
                            /\ UNCHANGED messages
-                /\ UNCHANGED << processed, delivered, sentREADY, sentMsg, 
-                                initSent >>
+                /\ UNCHANGED << processed, delivered, sentREADY, sentMsg >>
 
 b(self) == B_Loop(self)
 
